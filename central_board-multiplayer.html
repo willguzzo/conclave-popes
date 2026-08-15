@@ -6176,13 +6176,28 @@ function mpApplyIncomingAction(action) {
   // dropped — but we still force a broadcast below so the sender's "waiting" overlay clears
   // instead of hanging forever waiting for a state change that was never going to come.
   if (seat === active && mpSeatOwner[seat] && mpSeatOwner[seat].type === 'human') {
+    // Borrow humanIdx = seat ONLY for the synchronous duration of this one dispatched click, so the
+    // relayed player's own click gates (isMyTurn()/===humanIdx checks) pass correctly on the host's
+    // authoritative copy — then immediately hand it back to the host's own seat. humanIdx must NOT
+    // be left pointed at another seat, or the host's own screen becomes live/clickable for that
+    // seat's turn too (that was the earlier bug: the host could act on anyone's turn just by
+    // clicking their own screen, since the host's own clicks never go through the relay at all).
     humanIdx = seat;
+    // Also re-render BEFORE locating/clicking: the button we're about to click was last drawn with
+    // the host's own humanIdx, so it may still carry a `disabled` attribute baked in from that
+    // render — and a genuinely disabled element's .click() is a no-op in a real browser, even
+    // called imperatively. Re-rendering now makes the DOM match what the relayed seat would
+    // actually see (which is also what its describeTarget() path was computed against), so the
+    // click both finds the right element AND is actually clickable.
+    mpOrigRenderAll();
     const el = mpLocateTarget(action.desc);
     if (el && typeof el.click === 'function') {
       el.click();
     } else {
       console.warn('mp: relayed click target not found', action.desc);
     }
+    humanIdx = mpMySeat;
+    mpOrigRenderAll(); // snap the host's own screen back to its own perspective right away
   } else {
     console.warn('mp: dropped an out-of-turn or stale relayed action', { fromSeat: seat, activeSeat: active });
   }
@@ -6205,10 +6220,11 @@ scheduleAICheck = function () {
 
 const mpOrigRenderAll = renderAll;
 renderAll = function () {
-  if (mpEnabled && mpIsHost) {
-    const active = mpComputeActiveSeat();
-    if (active != null && mpSeatOwner[active] && mpSeatOwner[active].type === 'human') humanIdx = active;
-  }
+  // The host's own screen must only ever be "my turn" for the host's own seat — never for
+  // whoever else's turn it happens to be. (It used to follow the live active seat here, which
+  // let the host click through everyone's turns from their own screen — see mpApplyIncomingAction
+  // for where that borrowing now correctly happens instead, scoped to one relayed click only.)
+  if (mpEnabled && mpIsHost) humanIdx = mpMySeat;
   mpOrigRenderAll();
   if (mpEnabled && mpIsHost) mpScheduleBroadcast();
 };
