@@ -6016,6 +6016,19 @@ const MP_SYNC_KEYS = ['players', 'currentPlayer', 'currentTurnPlayer', 'turnPhas
   'curiaDeck', 'curiaDiscard', 'aiProfiles', 'playerActionTurnCount', 'currentYear', 'gameSeq', 'conclave',
   'conclaveCount', 'gameOver', 'conclaveRevealSeq', 'tallyJobScheduled', 'buildingLevelsThisTurn'];
 
+let mpLastToast = null; // {html, extraStyle, seq} — most recent host-side showToast() call
+let mpToastSeq = 0;
+let mpAppliedToastSeq = 0;
+
+const mpOrigShowToast = showToast;
+showToast = function (html, extraStyle) {
+  mpOrigShowToast(html, extraStyle);
+  if (mpEnabled && mpIsHost) {
+    mpToastSeq++;
+    mpLastToast = { html, extraStyle: extraStyle || null, seq: mpToastSeq };
+  }
+};
+
 function mpSerializeState() {
   return {
     players, currentPlayer, currentTurnPlayer, turnPhase, turnActions,
@@ -6026,6 +6039,7 @@ function mpSerializeState() {
     currentYear, gameSeq, conclave, conclaveCount, gameOver,
     conclaveRevealSeq, tallyJobScheduled, buildingLevelsThisTurn,
     greekUsedThisPhase: Array.from(greekUsedThisPhase),
+    toast: mpLastToast,
   };
 }
 
@@ -6046,6 +6060,10 @@ function mpApplyState(data) {
   humanIdx = mpMySeat;
   mpSetAwaiting(false);
   mpOrigRenderAll();
+  if (!mpIsHost && data.toast && data.toast.seq > mpAppliedToastSeq) {
+    mpAppliedToastSeq = data.toast.seq;
+    mpOrigShowToast(data.toast.html, data.toast.extraStyle);
+  }
 }
 
 function mpScheduleBroadcast() {
@@ -6115,13 +6133,23 @@ function mpLocateTarget(desc) {
   return cur;
 }
 
+function mpIsMyTurnNow() {
+  const active = mpComputeActiveSeat();
+  return active === mpMySeat && mpSeatOwner[mpMySeat] && mpSeatOwner[mpMySeat].type === 'human';
+}
+
 function mpClickRelayHandler(e) {
   if (!mpEnabled || mpIsHost || !mpGameStarted) return;
   const target = e.target;
   if (!(target instanceof Element)) return;
   if (mpShouldSkipRelay(target)) return;
+  // Only my own active turn is allowed through at all — everything else is inert except tabs
+  // (which are already excluded above via mpShouldSkipRelay). This is enforced again on the
+  // host below as the real backstop, since this client's notion of "my turn" is only as fresh
+  // as its last received broadcast.
   e.preventDefault();
   e.stopImmediatePropagation();
+  if (!mpIsMyTurnNow()) return;
   if (mpAwaitingAck) return; // one in-flight action at a time, for correctness
   mpSetAwaiting(true);
   const desc = mpDescribeTarget(target);
@@ -6142,14 +6170,25 @@ function mpDrainActionQueue() {
 function mpApplyIncomingAction(action) {
   if (!action) return;
   const seat = action.seat;
-  if (mpSeatOwner[seat] && mpSeatOwner[seat].type === 'human') humanIdx = seat;
-  const el = mpLocateTarget(action.desc);
-  if (el && typeof el.click === 'function') {
-    el.click();
+  const active = mpComputeActiveSeat();
+  // Real backstop: only ever act on behalf of whichever seat is actually the live decision-maker
+  // right now, regardless of what the sender claims. A stale/out-of-turn/spoofed action is simply
+  // dropped — but we still force a broadcast below so the sender's "waiting" overlay clears
+  // instead of hanging forever waiting for a state change that was never going to come.
+  if (seat === active && mpSeatOwner[seat] && mpSeatOwner[seat].type === 'human') {
+    humanIdx = seat;
+    const el = mpLocateTarget(action.desc);
+    if (el && typeof el.click === 'function') {
+      el.click();
+    } else {
+      console.warn('mp: relayed click target not found', action.desc);
+    }
   } else {
-    console.warn('mp: relayed click target not found', action.desc);
+    console.warn('mp: dropped an out-of-turn or stale relayed action', { fromSeat: seat, activeSeat: active });
   }
+  mpScheduleBroadcast(); // unconditional — guarantees the sender's client always hears back
 }
+
 
 /* ---------- Hook into the existing engine (additive overrides, originals preserved) ---------- */
 const mpOrigIsAIControlled = isAIControlled;
