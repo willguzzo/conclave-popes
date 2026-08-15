@@ -6074,7 +6074,8 @@ function mpScheduleBroadcast() {
 function mpBroadcastNow() {
   if (!mpEnabled || !mpIsHost || !mpRoomRef) return;
   mpStateVersion++;
-  mpRoomRef.update({ stateJSON: JSON.stringify(mpSerializeState()), stateVersion: mpStateVersion });
+  mpRoomRef.update({ stateJSON: JSON.stringify(mpSerializeState()), stateVersion: mpStateVersion })
+    .catch(e => console.error('mp: broadcast write to Firebase failed — check that your Realtime Database rules allow write access (they may have reverted to locked/default, or test-mode rules can expire after 30 days)', e));
 }
 
 /* ---------- Action relay (non-host -> host) ---------- */
@@ -6091,8 +6092,18 @@ function mpComputeActiveSeat() {
   return currentTurnPlayer;
 }
 
+let mpAwaitingTimeout = null;
+function mpShowConnectionWarning() {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:2500;background:#3a0e14;border:1px solid #e0bd6c;color:#e0bd6c;padding:10px 18px;border-radius:8px;font-size:13px;max-width:90vw;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,0.4);';
+  el.textContent = "Didn't hear back within 10 seconds — check your internet connection and that the host's tab is still open (or check the browser console / Firebase database rules if this keeps happening). Your last click may not have gone through; try again.";
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 7000);
+}
+
 function mpSetAwaiting(v) {
   mpAwaitingAck = v;
+  if (mpAwaitingTimeout) { clearTimeout(mpAwaitingTimeout); mpAwaitingTimeout = null; }
   let overlay = document.getElementById('mp-wait-overlay');
   if (v) {
     if (!overlay) {
@@ -6101,6 +6112,13 @@ function mpSetAwaiting(v) {
       overlay.style.cssText = 'position:fixed;inset:0;z-index:1500;background:rgba(0,0,0,0.02);cursor:wait;';
       document.body.appendChild(overlay);
     }
+    // Never hang forever, regardless of the underlying cause (dropped connection, a Firebase
+    // rules problem, or anything else unforeseen) — auto-recover and tell the person what to check.
+    mpAwaitingTimeout = setTimeout(() => {
+      console.warn('mp: no acknowledgment from the host within 10s — auto-clearing the wait state.');
+      mpSetAwaiting(false);
+      mpShowConnectionWarning();
+    }, 10000);
   } else if (overlay) {
     overlay.remove();
   }
@@ -6163,8 +6181,16 @@ function mpDrainActionQueue() {
   const item = mpActionQueue.shift();
   if (!item) return;
   mpProcessingAction = true;
-  mpApplyIncomingAction(item);
-  setTimeout(() => { mpProcessingAction = false; mpDrainActionQueue(); }, 40);
+  try {
+    mpApplyIncomingAction(item);
+  } catch (e) {
+    // Whatever went wrong, never let it wedge the queue or leave the sender's client hanging.
+    console.error('mp: uncaught error applying a relayed action — dropping it and moving on', e);
+    humanIdx = mpMySeat;
+    mpScheduleBroadcast();
+  } finally {
+    setTimeout(() => { mpProcessingAction = false; mpDrainActionQueue(); }, 40);
+  }
 }
 
 function mpApplyIncomingAction(action) {
@@ -6175,31 +6201,43 @@ function mpApplyIncomingAction(action) {
   // right now, regardless of what the sender claims. A stale/out-of-turn/spoofed action is simply
   // dropped — but we still force a broadcast below so the sender's "waiting" overlay clears
   // instead of hanging forever waiting for a state change that was never going to come.
-  if (seat === active && mpSeatOwner[seat] && mpSeatOwner[seat].type === 'human') {
-    // Borrow humanIdx = seat ONLY for the synchronous duration of this one dispatched click, so the
-    // relayed player's own click gates (isMyTurn()/===humanIdx checks) pass correctly on the host's
-    // authoritative copy — then immediately hand it back to the host's own seat. humanIdx must NOT
-    // be left pointed at another seat, or the host's own screen becomes live/clickable for that
-    // seat's turn too (that was the earlier bug: the host could act on anyone's turn just by
-    // clicking their own screen, since the host's own clicks never go through the relay at all).
-    humanIdx = seat;
-    // Also re-render BEFORE locating/clicking: the button we're about to click was last drawn with
-    // the host's own humanIdx, so it may still carry a `disabled` attribute baked in from that
-    // render — and a genuinely disabled element's .click() is a no-op in a real browser, even
-    // called imperatively. Re-rendering now makes the DOM match what the relayed seat would
-    // actually see (which is also what its describeTarget() path was computed against), so the
-    // click both finds the right element AND is actually clickable.
-    mpOrigRenderAll();
-    const el = mpLocateTarget(action.desc);
-    if (el && typeof el.click === 'function') {
-      el.click();
+  //
+  // The whole dispatch is wrapped so that ANY exception thrown by the underlying (unmodified)
+  // game code — which was never written expecting to be driven this way — still guarantees we
+  // restore the host's own perspective and send an acknowledgment back. Without this, one
+  // unexpected error anywhere in ~40 different click handlers could silently wedge the relay
+  // pipeline and leave a remote player's screen spinning forever with no way to recover short of
+  // reloading.
+  try {
+    if (seat === active && mpSeatOwner[seat] && mpSeatOwner[seat].type === 'human') {
+      // Borrow humanIdx = seat ONLY for the synchronous duration of this one dispatched click, so
+      // the relayed player's own click gates (isMyTurn()/===humanIdx checks) pass correctly on the
+      // host's authoritative copy — then immediately hand it back to the host's own seat. humanIdx
+      // must NOT be left pointed at another seat, or the host's own screen becomes live/clickable
+      // for that seat's turn too (that was the earlier bug: the host could act on anyone's turn
+      // just by clicking their own screen, since the host's own clicks never go through the relay).
+      humanIdx = seat;
+      // Also re-render BEFORE locating/clicking: the button we're about to click was last drawn with
+      // the host's own humanIdx, so it may still carry a `disabled` attribute baked in from that
+      // render — and a genuinely disabled element's .click() is a no-op in a real browser, even
+      // called imperatively. Re-rendering now makes the DOM match what the relayed seat would
+      // actually see (which is also what its describeTarget() path was computed against), so the
+      // click both finds the right element AND is actually clickable.
+      mpOrigRenderAll();
+      const el = mpLocateTarget(action.desc);
+      if (el && typeof el.click === 'function') {
+        el.click();
+      } else {
+        console.warn('mp: relayed click target not found', action.desc);
+      }
     } else {
-      console.warn('mp: relayed click target not found', action.desc);
+      console.warn('mp: dropped an out-of-turn or stale relayed action', { fromSeat: seat, activeSeat: active });
     }
+  } catch (e) {
+    console.error('mp: exception while dispatching a relayed action', e);
+  } finally {
     humanIdx = mpMySeat;
     mpOrigRenderAll(); // snap the host's own screen back to its own perspective right away
-  } else {
-    console.warn('mp: dropped an out-of-turn or stale relayed action', { fromSeat: seat, activeSeat: active });
   }
   mpScheduleBroadcast(); // unconditional — guarantees the sender's client always hears back
 }
