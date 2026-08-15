@@ -6308,6 +6308,29 @@ chooseMode = function (mode) {
   } catch (e) {}
 })();
 
+// If the HOST's tab is backgrounded/hidden (switched away from, minimized, etc.), browsers
+// throttle its JavaScript timers heavily to save power — which delays exactly the processing this
+// game relies on to relay other players' actions and broadcast results. This can't be fixed from
+// inside the page (it's a browser power-saving policy, not a bug), but we can at least warn the
+// host clearly instead of leaving everyone else's screens mysteriously stuck.
+function mpShowHostHiddenWarning() {
+  if (document.getElementById('mp-hidden-warning')) return;
+  const el = document.createElement('div');
+  el.id = 'mp-hidden-warning';
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:3000;background:#3a0e14;border-bottom:1px solid #e0bd6c;color:#e0bd6c;padding:8px 16px;font-size:13px;text-align:center;';
+  el.textContent = 'This tab is in the background — browsers slow down inactive tabs, which can make other players\u2019 turns appear to hang. Keep the host tab open and visible for smooth play.';
+  document.body.prepend(el);
+}
+function mpHideHostHiddenWarning() {
+  const el = document.getElementById('mp-hidden-warning');
+  if (el) el.remove();
+}
+document.addEventListener('visibilitychange', () => {
+  if (!mpEnabled || !mpIsHost) return;
+  if (document.hidden) mpShowHostHiddenWarning();
+  else mpHideHostHiddenWarning();
+});
+
 </script>
 </body>
 </html>
