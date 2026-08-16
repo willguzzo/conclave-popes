@@ -5884,7 +5884,19 @@ function mpAttachRoomListeners() {
   });
   if (mpIsHost) {
     mpRoomRef.child('actions').on('child_added', snap => {
-      mpActionQueue.push(snap.val());
+      // The whole action is stored as one JSON string (see mpClickRelayHandler) rather than as
+      // structured Firebase data — Firebase's Realtime Database has no true array type and drops
+      // fields like an empty array entirely on the wire, which silently corrupted click descriptors
+      // for any element identified purely by a stable id (an empty path array). A JSON string is
+      // immune to all of that, the same reason full game-state broadcasts already use one.
+      let action = null;
+      try {
+        const raw = snap.val();
+        action = raw && typeof raw.payload === 'string' ? JSON.parse(raw.payload) : raw;
+      } catch (e) {
+        console.error('mp: could not parse a relayed action — dropping it', e);
+      }
+      if (action) mpActionQueue.push(action);
       mpRoomRef.child('actions/' + snap.key).remove();
       mpDrainActionQueue();
     });
@@ -6141,10 +6153,14 @@ function mpDescribeTarget(el) {
 }
 
 function mpLocateTarget(desc) {
+  if (!desc) return null;
   let root = desc.anchorId ? document.getElementById(desc.anchorId) : document.body;
   if (!root) return null;
   let cur = root;
-  for (const idx of desc.path) {
+  const path = desc.path || []; // Firebase RTDB drops empty-array fields entirely on the wire —
+                                 // an id-only descriptor (no path needed) arrives with path missing,
+                                 // not an empty array. Default it back to [] rather than crash.
+  for (const idx of path) {
     if (!cur.children || !cur.children[idx]) return null;
     cur = cur.children[idx];
   }
@@ -6184,8 +6200,9 @@ function mpClickRelayHandler(e) {
   }
   mpSetAwaiting(true);
   const desc = mpDescribeTarget(target);
+  const payload = { seat: mpMySeat, desc, ts: Date.now(), clientId: mpClientId };
   console.log('mp: relaying click to host', { clickedElement: target.id || target.className || target.tagName, seat: mpMySeat, desc });
-  mpRoomRef.child('actions').push({ seat: mpMySeat, desc, ts: Date.now(), clientId: mpClientId })
+  mpRoomRef.child('actions').push({ payload: JSON.stringify(payload) })
     .then(() => console.log('mp: action successfully written to Firebase, waiting for host to process it'))
     .catch(e => { console.error('mp: FAILED to write action to Firebase', e); mpSetAwaiting(false); });
 }
