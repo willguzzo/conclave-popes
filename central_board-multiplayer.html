@@ -6042,13 +6042,22 @@ showToast = function (html, extraStyle) {
 };
 
 function mpSerializeState() {
+  // conclave.workingSelectedIdx is a JS Set (tracks which cards a player has clicked to select
+  // during the conclave selection phase). JSON.stringify silently turns a Set into "{}" — it has
+  // no idea how to serialize one — so it has to be converted to a plain array here, same as
+  // greekUsedThisPhase already is below, or every mirror's copy of it quietly becomes a plain
+  // object that crashes the moment the game calls .has()/.add() on it during card selection.
+  let conclaveOut = conclave;
+  if (conclave && conclave.workingSelectedIdx instanceof Set) {
+    conclaveOut = Object.assign({}, conclave, { workingSelectedIdx: Array.from(conclave.workingSelectedIdx) });
+  }
   return {
     players, currentPlayer, currentTurnPlayer, turnPhase, turnActions,
     artDeck, artDiscard, bookDeck, bookDiscard, bookMarket,
     innovationTrack, innovationOpen, innovationDecks, buildingStacks,
     activityLog, nextInstanceId, cardinalDeck, cardinalBoard,
     curiaDeck, curiaDiscard, aiProfiles, playerActionTurnCount,
-    currentYear, gameSeq, conclave, conclaveCount, gameOver,
+    currentYear, gameSeq, conclave: conclaveOut, conclaveCount, gameOver,
     conclaveRevealSeq, tallyJobScheduled, buildingLevelsThisTurn,
     greekUsedThisPhase: Array.from(greekUsedThisPhase),
     toast: mpLastToast,
@@ -6065,6 +6074,9 @@ function mpApplyState(data) {
   curiaDeck = data.curiaDeck; curiaDiscard = data.curiaDiscard;
   aiProfiles = data.aiProfiles; playerActionTurnCount = data.playerActionTurnCount;
   currentYear = data.currentYear; gameSeq = data.gameSeq; conclave = data.conclave;
+  if (conclave && conclave.workingSelectedIdx && !(conclave.workingSelectedIdx instanceof Set)) {
+    conclave.workingSelectedIdx = new Set(conclave.workingSelectedIdx);
+  }
   conclaveCount = data.conclaveCount; gameOver = data.gameOver;
   conclaveRevealSeq = data.conclaveRevealSeq; tallyJobScheduled = data.tallyJobScheduled;
   buildingLevelsThisTurn = data.buildingLevelsThisTurn;
