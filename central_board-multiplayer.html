@@ -6167,12 +6167,27 @@ function mpClickRelayHandler(e) {
   // as its last received broadcast.
   e.preventDefault();
   e.stopImmediatePropagation();
-  if (!mpIsMyTurnNow()) return;
-  if (mpAwaitingAck) return; // one in-flight action at a time, for correctness
+  if (!mpIsMyTurnNow()) {
+    console.warn('mp: click ignored — this client does not think it is currently your turn', {
+      clickedElement: target.id || target.className || target.tagName,
+      mySeat: mpMySeat,
+      mySeatType: mpSeatOwner[mpMySeat] ? mpSeatOwner[mpMySeat].type : null,
+      activeSeatComputed: mpComputeActiveSeat(),
+      currentTurnPlayer, currentPlayer, turnPhase,
+      conclavePhase: conclave ? conclave.phase : null,
+    });
+    return;
+  }
+  if (mpAwaitingAck) {
+    console.warn('mp: click ignored — still waiting on the result of a previous action');
+    return;
+  }
   mpSetAwaiting(true);
   const desc = mpDescribeTarget(target);
+  console.log('mp: relaying click to host', { clickedElement: target.id || target.className || target.tagName, seat: mpMySeat, desc });
   mpRoomRef.child('actions').push({ seat: mpMySeat, desc, ts: Date.now(), clientId: mpClientId })
-    .catch(() => mpSetAwaiting(false));
+    .then(() => console.log('mp: action successfully written to Firebase, waiting for host to process it'))
+    .catch(e => { console.error('mp: FAILED to write action to Firebase', e); mpSetAwaiting(false); });
 }
 document.addEventListener('click', mpClickRelayHandler, true);
 
@@ -6197,6 +6212,7 @@ function mpApplyIncomingAction(action) {
   if (!action) return;
   const seat = action.seat;
   const active = mpComputeActiveSeat();
+  console.log('mp: host received a relayed action', { fromSeat: seat, activeSeatOnHost: active, desc: action.desc });
   // Real backstop: only ever act on behalf of whichever seat is actually the live decision-maker
   // right now, regardless of what the sender claims. A stale/out-of-turn/spoofed action is simply
   // dropped — but we still force a broadcast below so the sender's "waiting" overlay clears
@@ -6226,9 +6242,11 @@ function mpApplyIncomingAction(action) {
       mpOrigRenderAll();
       const el = mpLocateTarget(action.desc);
       if (el && typeof el.click === 'function') {
+        console.log('mp: dispatching relayed click on', el.id || el.className || el.tagName, 'disabled:', el.disabled);
         el.click();
+        console.log('mp: relayed click dispatched successfully');
       } else {
-        console.warn('mp: relayed click target not found', action.desc);
+        console.warn('mp: relayed click target not found on host — the described element could not be located', action.desc);
       }
     } else {
       console.warn('mp: dropped an out-of-turn or stale relayed action', { fromSeat: seat, activeSeat: active });
